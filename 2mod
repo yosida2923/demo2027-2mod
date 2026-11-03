@@ -1,0 +1,223 @@
+2 модуль
+Зайди на HQ-RTR and BR-RTR
+int tunnel.0
+ip mtu 1400
+подключиться к BR-FW отключить фильтрацию и SNAT в ospf в дополнительно убрать инвертировать значение поля входящих сетей
+на
+HQ-CLI 
+отказаться от использования автоматического dns
+nmcli connection modify «Проводное подключение 1» -ipv4.ignore-auto-dns yes
+
+Задание 1. Домен
+BR-SRV
+samba-tool group add hq
+for i in {1..5};
+do 
+samba-tool user add hquser$i P@ssw0rd
+samba-tool user setexpiry hquser$i –noexpiry
+samba-tool group addmembers “hq” hquser$i
+done
+samba-tool domain passwordsettings set --min-pwd-length=8
+samba-tool domain passwordsettings set --account-lockout-threshold=5
+samba-tool user setexpiry administrator --noexpiry
+HQ-CLI
+ввести клиента в домен через acc
+администрирование
+выбрать Домен Active Directory
+применить 
+ввести пароль Administrator
+roleadd hq wheel
+mcedit /etc/sudoers
+User_Alias WHEEL-USERS = %wheel, %AU-TEAM\\hq
+Cmnd_Alias	SHELLCMD = /usr/bin/id, /usr/bin/cat, /bin/grep
+WHEEL_USERS ALL=(ALL:ALL) SHELLCMD
+выйти из user
+войти в hquser(от 1-5)
+проверить в терминале sudo id и sudo cat /etc/passwd
+Задание 2. Raid
+
+HQ-SRV
+echo "DEVICE partitions" > /etc/mdadm.conf
+mdadm --detail --scan >> /etc/mdadm.conf
+df -T
+Задание 3. Настройка NFS
+HQ-SRV
+mcedit /etc/exports
+/raid/nfs 10.10.200.2/28(rw,sync,no_subtree_check,no_root_squash)
+#10.20.30.0/29(rw,sync,no_root_squash) (сдвинуть на одну строчку и закоментировать)
+exportfs -ar
+HQ-CLI
+cat /etc/fstab
+df -h
+Задание 4. Настройте службу сетевого времени на базе сервиса chrony
+ISP
+vim /etc/chrony.conf либо mcedit
+local stratum 5
+allow 172.16.1.0/28
+allow 172.16.2.0/28
+Указываем IP-адрес NTP-сервера:
+ntp server 172.16.1.1(HQ-RTR)
+ntp synchronize
+ntp server 172.16.2.1(BR-RTR)
+ntp synchronize
+Проверка конфигурации NTP-клиента EcoRouter
+Проверяем командой:
+show ntp status
+Конфигурация NTP-клиента BR-FW
+сервисы
+NTP-сервер
+прописать 172.16.2.1
+добавить
+Конфигурация NTP-клиента Alt Linux
+Приводим начало файла /etc/chrony.conf к следующему виду:
+pool 172.16.1.1 iburst (для HQ-CLI(в файле pool будет в конце) HQ-SRV)
+pool 172.16.2.1 iburst (для BR-SRV)
+timedatectl set-ntp 0
+systemctl restart chronyd
+timedatectl set-ntp 1
+проверка:
+timedatectl
+chronyc sources
+Задание 5 (BR-SRV) 
+HQ-CLI
+Mcedit /etc/openssh_config
+Port 2027 
+systemctl restart sshd
+ssh -p 2026 root@10.10.100.2
+Mcedit /etc/openssh_config
+Port 2027 
+systemctl restart sshd
+ssh -p 2026 root@10.20.20.2
+Mcedit /etc/openssh_config
+Port 2027 
+systemctl restart sshd
+
+И дальше остаёмся на BR-SRV(10.20.20.2) и настраиваем его
+
+Редактируем указанные строки в конфигурационном файле /etc/ansible/ansible.cfg:
+в [defaults]
+заменить sshuder на root
+дописать interpreter_ python = /usr/bin/python3
+
+apt-get install -y git ansible-core pip 
+pip install ansible-pylibssh
+
+ssh-keygen -t ed25519 (везде enter)
+ssh-copy-id -p 2027 root@hq-cli
+ssh-copy-id -p 2027 root@hq-srv
+зайти в браузере ansible collection index
+сайт Collection Index — Ansible
+открыть в вкладках 3 ссылки:
+- ansible.utils
+- ansible.netcommon
+- cisco.ios
+в каждой открыть Repository (Sources)
+В ansible.utils
+выбрать версию (нажать на main выбрать tags) v5.1.2
+нажать на code и скопировать оттуда ссылку и вставить в строку после git+ и записать после ссылки через запитую v5.1.2
+ansible-galaxy collection install git+https://github.com/ansible-collections/ansible.utils.git,v5.1.2
+В ansible.netcommon
+выбрать версию (нажать на main выбрать tags) v7.2.0
+нажать на code и скопировать оттуда ссылку и вставить в строку после git+ и записать после ссылки через запитую v7.2.0
+ansible-galaxy collection install git+https://github.com/ansible-collections/ansible.netcommon.git,v7.2.0
+
+В cisco.ios
+выбрать версию (нажать на main выбрать tags) v9.1.2
+нажать на code и скопировать оттуда ссылку и вставить в строку после git+ и записать после ссылки через запитую v9.1.2
+ansible-galaxy collection install git+https://github.com/ansible-collections/cisco.ios.git,v9.1.2
+
+Далее заполняем инвентарный файл /etc/ansible/hosts: 
+[hq]
+hq-srv ansible_host=10.10.100.2 ansible_pass=toor ansible_port=2027
+hq-cli ansible_host=10.10.200.2 ansible_pass=toor ansible_port=2027
+hq-rtr ansible_host=172.16.1.2 ansible_user=admin ansible_pass=admin ansible_become_password=admin ansible_connection=network_cli ansible_network_os=ios
+[br]
+br-rtr ansible_host=172.16.2.1 ansible_user=admin ansible_pass=admin ansible_become_password=admin ansible_connection=network_cli ansible_network_os=ios
+#bq-cli ansible_host=10.20.30.2 (br-cli закоментировать) 
+Задание 6 docker
+
+BR-SRV
+apt-get update && apt-get install docker-compose docker-engine -y
+systemctl enable --now docker
+mount -o loop /dev/sr0 /mnt/
+docker load -i /mnt/docker/site_latest.tar
+docker load -i /mnt/docker/mariadb_latest.tar
+
+vim compose.yaml
+
+services:
+  db:
+    image: mariadb:10.11
+    container_name: db
+    environment:
+      MARIADB_DATABASE: "testdb"
+      MARIADB_USER: "test"
+      MARIADB_PASSWORD: "P@ssw0rd"
+      MARIADB_ROOT_PASSWORD: "P@ssw0rd"
+    restart: always
+    ports:
+      - "3306:3306"
+
+  testapp:
+    image: site:latest
+    container_name: testapp
+    environment:
+      DB_TYPE: "maria"
+      DB_HOST: db
+      DB_NAME: "testdb"
+      DB_USER: "testc"
+      DB_PASS: "P@ssw0rd"
+      DB_PORT: "3306"
+    ports:
+      - "8080:8000"
+    depends_on:
+      - db
+    restart: always
+
+docker compose -f site.yml up -d
+docker compose -f site.yml logs testapp
+Задание 7
+HQ-SRV
+apt-get update 
+apt-get install apache2-mod_php8.3 php8.3-mysqlnd php8.3-mysqlnd-mysqli -y
+a2enmod mod_php8.3
+mount /home/user/Additional.iso /mnt/cd-rom
+systemctl restart httpd2
+systemctl reload httpd2
+systemctl enable --now httpd2 
+systemctl enable --now mariadb
+cp /mnt/cd-rom/web/*.p* /var/www/html/.
+cd /var/www/html
+mcedit /var/www/html/index.php
+$servername = "localhost";
+$username = "web";
+$password = "P@ssword";
+$dbname = "webdb";
+mariadb -u root
+Mariadb [(none)]> SHOW DATABASES;
+Mariadb [(none)]> USE webdb;
+Mariadb [(webdb)]> SHOW TABLES;
+Mariadb [(webdb)]> SELECT * FROM employees;
+Mariadb [(webdb)]> SELECT User FROM mysql.user;
+Mariadb [(webdb)]> SHOW GRANTS FOR ‘web’@‘localhost’;
+Mariadb [(webdb)]> exit
+Mariadb [(webdb)]> FLUSH PRIVILEGES;
+Mariadb [(webdb)]> exit
+# mariadb -u web -p -D webdb < /mnt/web/dump.sql
+# P@ssw0rd
+systemctl enable --now httpd2
+		
+Задание 8 
+HQ-RTR: 
+ip nat destination static tcp 172.16.1.2 8080 10.10.100.2 80 hairpin 
+ip nat source static tcp 10.10.100.2 80 172.16.1.2 8080 
+ip nat destination static tcp 172.16.1.2 2027 10.10.100.2 2027 hairpin 
+ip nat source static tcp 10.10.100.2 2027 172.16.1.2 2027 
+BR-RTR: 
+ip nat destination static tcp 172.16.2.2 8080 10.20.20.2 80 hairpin
+ip nat source static tcp 10.20.30.2 80 172.16.2.2 8080 
+ ip nat destination static tcp 172.16.2.2 2027 10.20.20.2 2027 hairpin
+ip nat source static tcp 10.20.30.2 2027 172.16.2.2 2027 
+Задание 9
+HQ-CLI
+apt-get install yandex-browser -y
