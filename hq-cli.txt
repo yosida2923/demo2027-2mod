@@ -1,0 +1,134 @@
+#!/bin/bash
+# HQ-CLI setup script
+# Запускать с правами root
+# ВНИМАНИЕ: шаги, требующие интерактивного ввода (ввод в домен, roleadd), выполняются вручную
+
+set -e
+
+# ============================================================
+# 1. Отключение автоматического DNS в NetworkManager
+# ============================================================
+CON_NAME="Проводное подключение 1"
+# Проверяем, существует ли соединение с таким именем
+if nmcli -t -f NAME connection show | grep -Fxq "$CON_NAME"; then
+    nmcli connection modify "$CON_NAME" ipv4.ignore-auto-dns yes
+    nmcli connection up "$CON_NAME" || true
+    echo "[OK] DNS auto ignored for '$CON_NAME'"
+else
+    echo "[WARN] Connection '$CON_NAME' not found. Available connections:"
+    nmcli -t -f NAME connection show
+    echo "Please modify CON_NAME in the script and re-run."
+fi
+
+# ============================================================
+# 2. Ввод в домен — ВЫПОЛНИТЬ ВРУЧНУЮ
+# ============================================================
+
+# ============================================================
+# 2. Ввод в домен (автоматически, требует корректного DNS)
+# ============================================================
+# Параметры домена (при необходимости измените)
+AD_DOMAIN="au-team.irpo"          # полное имя домена (Realm)
+AD_WORKGROUP="AU-TEAM"           # рабочая группа / NetBIOS имя домена
+AD_USER="administrator"          # учётная запись с правами ввода в домен
+AD_PASS='P@ssw0rd'               # пароль
+
+# Имя компьютера (короткое, без домена)
+AD_HOSTNAME="$(hostname -s)"
+
+echo "[INFO] Joining domain: $AD_DOMAIN as $AD_HOSTNAME"
+
+# Проверка, что DNS резолвит домен (важно!)
+if ! getent hosts "$AD_DOMAIN" >/dev/null 2>&1; then
+    echo "[ERROR] Cannot resolve $AD_DOMAIN. Configure DNS to point to the domain controller first."
+    echo "        Example: add 'nameserver <DC_IP>' to /etc/net/ifaces/<iface>/resolv.conf"
+    echo "        and set 'search_domains=$AD_DOMAIN' in /etc/resolvconf.conf, then run: resolvconf -u"
+    exit 1
+fi
+
+# Установка пакета (если ещё не установлен)
+if ! rpm -q task-auth-ad-sssd >/dev/null 2>&1; then
+    apt-get install -y task-auth-ad-sssd
+fi
+
+# Ввод в домен
+# По умолчанию используется SSSD. Если нужен Winbind — добавьте --winbind
+system-auth write ad "$AD_DOMAIN" "$AD_HOSTNAME" "$AD_WORKGROUP" "$AD_USER" "$AD_PASS"
+
+echo "[OK] Domain join command executed. A reboot is required to apply all settings."
+echo "[INFO] After reboot, continue with step 3 (roleadd) and later steps."
+# ============================================================
+# 3. roleadd — выполнять ПОСЛЕ ввода в домен и перезагрузки
+# ============================================================
+roleadd hq wheel
+
+# ============================================================
+SUDO_FILE="/etc/sudoers"
+
+# Если файл уже есть — удаляем только его, чтобы заменить блок целиком
+# (основной /etc/sudoers не трогается)
+rm -f "$SUDO_FILE"
+
+cat > "$SUDO_FILE" <<'EOF'
+User_Alias WHEEL_USERS = %wheel, %AU-TEAM\\hq
+Cmnd_Alias SHELLCMD = /usr/bin/id, /usr/bin/cat, /bin/grep
+WHEEL_USERS ALL=(ALL:ALL) SHELLCMD
+EOF
+chmod 440 "$SUDO_FILE"
+
+if visudo -cf "$SUDO_FILE"; then
+    echo "[OK] $SUDO_FILE создан и проверен"
+else
+    echo "[ERROR] синтаксис sudoers, проверьте $SUDO_FILE"
+    rm -f "$SUDO_FILE"
+    exit 1
+fi 
+# ============================================================
+# 5. Chrony — заменить или добавить строку pool
+# ============================================================
+CHRONY_CONF="/etc/chrony.conf"
+# Удалить все старые строки server/pool, затем добавить нужную
+sed -i '/^\s*\(server\|pool\)\s\+/d' "$CHRONY_CONF"
+# Если после удаления файл не заканчивается переводом строки, добавить
+[ -n "$(tail -c1 "$CHRONY_CONF")" ] && echo >> "$CHRONY_CONF"
+echo "pool 172.16.1.1 iburst" >> "$CHRONY_CONF"
+
+timedatectl set-ntp 0 || true
+systemctl restart chronyd
+systemctl enable chronyd
+timedatectl set-ntp 1 || true
+echo "[OK] Chrony configured with pool 172.16.1.1"
+
+# ============================================================
+# 6. SSH — установить Port 2027
+# ============================================================
+SSHD_CONF="/etc/openssh/sshd_config"
+if [ -f "$SSHD_CONF" ]; then
+    # Если строка Port существует (в любом виде), заменить её; иначе добавить
+    if grep -qE '^\s*#*\s*Port\s+' "$SSHD_CONF"; then
+        sed -i -E 's/^\s*#*\s*Port\s+.*/Port 2027/' "$SSHD_CONF"
+    else
+        echo "Port 2027" >> "$SSHD_CONF"
+    fi
+    systemctl restart sshd
+    echo "[OK] sshd Port set to 2027"
+else
+    echo "[ERROR] $SSHD_CONF not found"
+fi
+
+# ============================================================
+# 7. Установка Yandex Browser
+# ============================================================
+# В репозитории ALT Linux пакет называется yandex-browser-stable
+if apt-get install -y yandex-browser-stable; then
+    echo "[OK] yandex-browser-stable installed"
+else
+    echo "[WARN] yandex-browser-stable not found, trying yandex-browser"
+    apt-get install -y yandex-browser || echo "[ERROR] Could not install Yandex Browser"
+fi
+
+# ============================================================
+# 8. Показать информацию о дисках (из ваших заметок)
+# ============================================================
+cat /etc/fstab
+df -h
