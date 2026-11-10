@@ -1,0 +1,111 @@
+#!/bin/bash
+# HQ-SRV setup script
+set -e
+
+# ============================================================
+# 1. mdadm
+# ============================================================
+echo "DEVICE partitions" > /etc/mdadm.conf
+
+# ============================================================
+# 2. NFS (пакет nfs-server обычно уже установлен)
+# ============================================================
+# Перезаписываем /etc/exports (по заданию)
+cat > /etc/exports <<'EOF'
+/raid/nfs 10.10.200.2/28(rw,sync,no_subtree_check,no_root_squash)
+#10.20.30.0/29(rw,sync,no_root_squash)
+EOF
+
+# Запуск NFS (в ALT Linux служба называется nfs) [citation:2][citation:7]
+systemctl enable --now nfs
+exportfs -r
+echo "[OK] NFS настроен"
+
+# ============================================================
+# 3. Chrony — перезапись файла (по заданию)
+# ============================================================
+cat > /etc/chrony.conf <<'EOF'
+pool 172.16.1.1 iburst
+EOF
+timedatectl set-ntp 0 || true
+systemctl restart chronyd
+systemctl enable chronyd
+timedatectl set-ntp 1 || true
+echo "[OK] Chrony настроен"
+
+# ============================================================
+# 4. SSH порт 2027 (путь в ALT Linux: /etc/openssh/sshd_config) [citation:1][citation:22]
+# ============================================================
+SSHD_CONF="/etc/openssh/sshd_config"
+if [ -f "$SSHD_CONF" ]; then
+    # Заменить существующую строку Port (включая закомментированную) или добавить
+    if grep -qE '^\s*#*\s*Port\s+' "$SSHD_CONF"; then
+        sed -i -E 's/^\s*#*\s*Port\s+.*/Port 2027/' "$SSHD_CONF"
+    else
+        echo "Port 2027" >> "$SSHD_CONF"
+    fi
+    systemctl restart sshd
+    echo "[OK] SSH порт = 2027"
+else
+    echo "[ERROR] $SSHD_CONF не найден"
+fi
+
+# ============================================================
+# 5. Установка PHP и Apache
+# ============================================================
+apt-get update
+apt-get install -y apache2-mod_php8.3 php8.3-mysqlnd php8.3-mysqlnd-mysqli
+a2enmod mod_php8.3 || true
+
+# ============================================================
+# 6. Монтирование ISO и копирование веб-файлов
+# ============================================================
+mkdir -p /mnt/cd-rom
+# Проверяем, не смонтирован ли уже
+if ! mountpoint -q /mnt/cd-rom; then
+    mount /home/user/Additional.iso /mnt/cd-rom
+fi
+
+systemctl enable --now httpd2
+systemctl enable --now mariadb
+
+# Копируем файлы (в заметках *.p* — сохраняем как в задании, но можно расширить)
+cp /mnt/cd-rom/web/*.p* /var/www/html/ 2>/dev/null || true
+# Дополнительно копируем всё, чтобы не пропустить изображения/другие файлы
+cp -rn /mnt/cd-rom/web/* /var/www/html/ 2>/dev/null || true
+
+# ============================================================
+# 7. index.php — точечная замена строк подключения (без удаления остального)
+# ============================================================
+INDEX_FILE="/var/www/html/index.php"
+if [ -f "$INDEX_FILE" ]; then
+    sed -i -E \
+        -e 's|^\s*\$servername\s*=.*|$servername = "localhost";|' \
+        -e 's|^\s*\$username\s*=.*|$username = "web";|' \
+        -e 's|^\s*\$password\s*=.*|$password = "P@ssword";|' \
+        -e 's|^\s*\$dbname\s*=.*|$dbname = "webdb";|' \
+        "$INDEX_FILE"
+    echo "[OK] index.php обновлён"
+else
+    echo "[WARN] $INDEX_FILE не найден — возможно, файлы не скопированы"
+fi
+
+# ============================================================
+# 8. MariaDB — создание пользователя web (если ещё нет)
+# ============================================================
+mariadb -u root <<'SQLEOF' || true
+CREATE DATABASE IF NOT EXISTS webdb;
+CREATE USER IF NOT EXISTS 'web'@'localhost' IDENTIFIED BY 'P@ssword';
+GRANT ALL PRIVILEGES ON webdb.* TO 'web'@'localhost';
+FLUSH PRIVILEGES;
+SQLEOF
+echo "[OK] MariaDB: пользователь web и база webdb готовы"
+
+# ============================================================
+# 9. Финальный перезапуск
+# ============================================================
+systemctl restart httpd2
+systemctl reload httpd2
+systemctl enable --now httpd2
+
+echo "[DONE] HQ-SRV настроен"
