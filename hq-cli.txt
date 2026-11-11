@@ -1,7 +1,8 @@
 #!/bin/bash
 # HQ-CLI setup script
 # Запускать с правами root
-# ВНИМАНИЕ: шаги, требующие интерактивного ввода (ввод в домен, roleadd), выполняются вручную
+# ВНИМАНИЕ: шаги 1-2 выполняются от root. После шага 2 обязательна перезагрузка.
+# Шаги 3 и далее запускать после перезагрузки!
 
 set -e
 
@@ -21,68 +22,78 @@ else
 fi
 
 # ============================================================
-# 2. Ввод в домен — ВЫПОЛНИТЬ ВРУЧНУЮ
+# 2. Ввод в домен (автоматически)
 # ============================================================
-
-# ============================================================
-# 2. Ввод в домен (автоматически, требует корректного DNS)
-# ============================================================
-# Параметры домена (при необходимости измените)
-AD_DOMAIN="au-team.irpo"          # полное имя домена (Realm)
-AD_WORKGROUP="AU-TEAM"           # рабочая группа / NetBIOS имя домена
-AD_USER="Administrator"          # учётная запись с правами ввода в домен
-AD_PASS='P@ssw0rd'               # пароль
-
-# Имя компьютера (короткое, без домена)
-AD_HOSTNAME="$(hostname -s)"
-
-echo "[INFO] Joining domain: $AD_DOMAIN as $AD_HOSTNAME"
-
-# Проверка, что DNS резолвит домен (важно!)
-if ! getent hosts "$AD_DOMAIN" >/dev/null 2>&1; then
-    echo "[ERROR] Cannot resolve $AD_DOMAIN. Configure DNS to point to the domain controller first."
-    echo "        Example: add 'nameserver <DC_IP>' to /etc/net/ifaces/<iface>/resolv.conf"
-    echo "        and set 'search_domains=$AD_DOMAIN' in /etc/resolvconf.conf, then run: resolvconf -u"
-    exit 1
-fi
-
-# Установка пакета (если ещё не установлен)
-if ! rpm -q task-auth-ad-sssd >/dev/null 2>&1; then
-    apt-get install -y task-auth-ad-sssd
-fi
-
-# Ввод в домен
-# По умолчанию используется SSSD. Если нужен Winbind — добавьте --winbind
-system-auth write ad "$AD_DOMAIN" "$AD_HOSTNAME" "$AD_WORKGROUP" "$AD_USER" "$AD_PASS"
-
-echo "[OK] Domain join command executed. A reboot is required to apply all settings."
-echo "[INFO] After reboot, continue with step 3 (roleadd) and later steps."
+# Параметры домена (при необходимости 
 # ============================================================
 # 3. roleadd — выполнять ПОСЛЕ ввода в домен и перезагрузки
 # ============================================================
 roleadd hq wheel
 
 # ============================================================
-SUDO_FILE="/etc/sudoers"
+# 4. /etc/sudoers — точечная правка
+# ============================================================
+SUDOERS="/etc/sudoers"
+BACKUP="/etc/sudoers.bak.$(date +%Y%m%d%H%M%S)"
 
-# Если файл уже есть — удаляем только его, чтобы заменить блок целиком
-# (основной /etc/sudoers не трогается)
-rm -f "$SUDO_FILE"
+cp -a "$SUDOERS" "$BACKUP"
+echo "[OK] Backup: $BACKUP"
 
-cat > "$SUDO_FILE" <<'EOF'
-User_Alias WHEEL_USERS = %wheel, %AU-TEAM\\hq
-Cmnd_Alias SHELLCMD = /usr/bin/id, /usr/bin/cat, /bin/grep
-WHEEL_USERS ALL=(ALL:ALL) SHELLCMD
-EOF
-chmod 440 "$SUDO_FILE"
-
-if visudo -cf "$SUDO_FILE"; then
-    echo "[OK] $SUDO_FILE создан и проверен"
+# --- 4.1 User_Alias WHEEL_USERS ---
+# Ищем строку User_Alias WHEEL_USERS и заменяем её на нужную (или добавляем)
+if grep -qE '^\s*#*\s*User_Alias\s+WHEEL_USERS\s*=' "$SUDOERS"; then
+    sed -i -E 's|^\s*#*\s*User_Alias\s+WHEEL_USERS\s*=.*|User_Alias WHEEL_USERS = %wheel, %AU-TEAM\\\\hq|' "$SUDOERS"
 else
-    echo "[ERROR] синтаксис sudoers, проверьте $SUDO_FILE"
-    rm -f "$SUDO_FILE"
+    # Если нет, добавляем после последнего User_Alias
+    awk '
+        /^[[:space:]]*User_Alias[[:space:]]+/ { last=NR }
+        { lines[NR]=$0 }
+        END {
+            for (i=1; i<=NR; i++) {
+                print lines[i]
+                if (i==last) print "User_Alias WHEEL_USERS = %wheel, %AU-TEAM\\\\hq"
+            }
+        }
+    ' "$SUDOERS" > "${SUDOERS}.tmp" && mv "${SUDOERS}.tmp" "$SUDOERS"
+fi
+
+# --- 4.2 Cmnd_Alias SHELLCMD — вставить после 4-го Cmnd_Alias (PKGMAN) ---
+NEW_CMND='Cmnd_Alias SHELLCMD = /usr/bin/id, /usr/bin/cat, /bin/grep'
+
+# Удаляем старые определения SHELLCMD, если скрипт запускается повторно
+sed -i -E '/^\s*#*\s*Cmnd_Alias\s+SHELLCMD\s*=/d' "$SUDOERS"
+
+# Вставляем строго после 4-й строки, начинающейся с Cmnd_Alias
+awk -v new="$NEW_CMND" '
+    /^[[:space:]]*Cmnd_Alias[[:space:]]+/ {
+        count++
+        if (count == 4) print_after = 1
+    }
+    { print $0 }
+    print_after { print new; print_after = 0 }
+' "$SUDOERS" > "${SUDOERS}.tmp" && mv "${SUDOERS}.tmp" "$SUDOERS"
+
+# --- 4.3 Строка правила для WHEEL_USERS (ТОЛЬКО ПЕРВАЯ) ---
+# Раскомментируем и меняем ТОЛЬКО первую строку (верхнюю).
+# Вторая строка ("Same thing without a password") останется закомментированной.
+if grep -qE '^\s*#*\s*WHEEL_USERS\s+ALL\s*=' "$SUDOERS"; then
+    # Ищем первую строку с WHEEL_USERS ALL=, игнорируя возможные комментарии,
+    # и заменяем её. Остальные (вторую) не трогаем.
+    sed -i '0,/^\s*#*\s*WHEEL_USERS\s\+ALL\s*=.*/s||WHEEL_USERS ALL=(ALL:ALL) SHELLCMD|' "$SUDOERS"
+else
+    # Если таких строк вообще нет — добавляем одну после User_Alias WHEEL_USERS
+    sed -i -E "/^\s*User_Alias\s+WHEEL_USERS\s*=/a\\WHEEL_USERS ALL=(ALL:ALL) SHELLCMD" "$SUDOERS"
+fi
+
+# --- 4.4 Проверка синтаксиса ---
+if visudo -cf "$SUDOERS"; then
+    echo "[OK] /etc/sudoers updated and validated"
+else
+    echo "[ERROR] sudoers syntax error — restoring backup"
+    cp -a "$BACKUP" "$SUDOERS"
     exit 1
-fi 
+fi
+
 # ============================================================
 # 5. Chrony — заменить или добавить строку pool
 # ============================================================
