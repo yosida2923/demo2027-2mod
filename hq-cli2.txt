@@ -1,0 +1,54 @@
+#!/bin/bash
+# Полная настройка HQ-CLI на ALT Linux
+# Запускать от root
+
+set -e
+
+echo "=== 1. Отключение автоматического DNS ==="
+if nmcli connection show "Проводное подключение 1" &>/dev/null; then
+    nmcli connection modify "Проводное подключение 1" ipv4.ignore-auto-dns yes
+    echo "Автоматический DNS отключён."
+else
+    echo "ВНИМАНИЕ: Соединение 'Проводное подключение 1' не найдено."
+fi
+
+echo "=== 2. Добавление роли hq в wheel ==="
+roleadd hq wheel 2>/dev/null || echo "roleadd: роль уже существует или выполнена ранее."
+
+echo "=== 3. Редактирование /etc/sudoers (добавление в конец, остальное не трогаем) ==="
+# Резервная копия
+cp /etc/sudoers /etc/sudoers.bak.$(date +%F-%H%M)
+
+# Проверяем, есть ли уже наши строки, чтобы не дублировать
+if ! grep -q "WHEEL-USERS" /etc/sudoers; then
+    cat >> /etc/sudoers <<'EOF'
+
+# --- Настройка HQ-CLI ---
+User_Alias WHEEL-USERS = %wheel, %AU-TEAM\\hq
+Cmnd_Alias SHELLCMD = /usr/bin/id, /usr/bin/cat, /bin/grep
+WHEEL-USERS ALL=(ALL:ALL) SHELLCMD
+# --- Конец настройки HQ-CLI ---
+EOF
+    echo "Правила sudoers добавлены (в конец файла)."
+else
+    echo "Правила sudoers уже присутствуют. Пропускаем."
+fi
+
+# Проверка синтаксиса sudoers (важно!)
+visudo -cf /etc/sudoers && echo "Синтаксис sudoers корректен." || echo "ОШИБКА в sudoers!"
+
+echo "=== 4. Проверка fstab и места на диске ==="
+echo "--- /etc/fstab ---"
+cat /etc/fstab
+echo "--- df -h ---"
+df -h
+
+echo "=== 5. Установка Яндекс Браузера ==="
+# В ALT Linux пакет называется yandex-browser-stable
+apt-get update
+apt-get install -y yandex-browser-stable
+
+echo "=== ВСЁ ГОТОВО ==="
+echo "Теперь выйдите из root и войдите как hquser1-5, затем проверьте:"
+echo "  sudo id"
+echo "  sudo cat /etc/passwd"
