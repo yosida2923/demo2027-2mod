@@ -82,7 +82,7 @@ if [ -f "$INDEX_FILE" ]; then
     sed -i -E \
         -e 's|^\s*\$servername\s*=.*|$servername = "localhost";|' \
         -e 's|^\s*\$username\s*=.*|$username = "web";|' \
-        -e 's|^\s*\$password\s*=.*|$password = "P@ssword";|' \
+        -e 's|^\s*\$password\s*=.*|$password = "P@ssw0rd";|' \
         -e 's|^\s*\$dbname\s*=.*|$dbname = "webdb";|' \
         "$INDEX_FILE"
     echo "[OK] index.php обновлён"
